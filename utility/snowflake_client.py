@@ -5,7 +5,7 @@ Loads an unencrypted (or passphrase-protected) RSA private key from disk,
 authenticates to Snowflake, and exposes simple helpers for the common
 data-loading workflow:
 
-    from src.snowflake_client import SnowflakeClient
+    from utility.snowflake_client import SnowflakeClient
 
     sf = SnowflakeClient()
     df = sf.read_sql("SELECT TOP 10 * FROM MY_DB.MY_SCHEMA.MY_TABLE")
@@ -172,9 +172,9 @@ class SnowflakeClient:
             sql += f" LIMIT {int(limit)}"
         return self.read_sql(sql)
 
-    def whoami(self) -> dict:
-        """Quick connection probe -- returns identity, account, region, role,
-        warehouse, db, schema, version. Useful for verifying the setup."""
+    def get_connection_info(self) -> dict:
+        """Return current session metadata (account, region, user, role,
+        warehouse, database, schema, version). Useful for verifying the setup."""
         df = self.read_sql(
             "SELECT "
             "  CURRENT_ACCOUNT()    AS account, "
@@ -191,7 +191,7 @@ class SnowflakeClient:
 
 if __name__ == "__main__":
     with SnowflakeClient() as sf:
-        info = sf.whoami()
+        info = sf.get_connection_info()
         print("Connected to Snowflake:")
         for k, v in info.items():
             print(f"  {k:>10}: {v}")

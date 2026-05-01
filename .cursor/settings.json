@@ -1,7 +1,0 @@
-{
-  "plugins": {
-    "snowflake-cursor-plugin": {
-      "enabled": true
-    }
-  }
-}
