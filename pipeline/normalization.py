@@ -1,7 +1,9 @@
 """
 Normalization step of the ELT Pipeline.
-Handles both FX historical data ingestion and the deterministic 
+Handles FX historical data ingestion and the deterministic
 physical/financial normalization CTAS across the 163M row dataset.
+
+Output: All values unified to USD per US Gallon (USD/GAL).
 """
 import sys
 import time
@@ -17,6 +19,7 @@ from utility.normalization_sql import get_physical_normalization_sql
 SOURCE_TABLE = "CMDTYA.PUBLIC.PRICEDATA_PARSED"
 TARGET_TABLE = "CMDTYA.PUBLIC.PRICEDATA_NORMALIZED"
 
+
 def run(*, skip_fx_ingest: bool = False) -> None:
     print("=" * 65)
     print("  NORMALIZATION PIPELINE")
@@ -27,12 +30,12 @@ def run(*, skip_fx_ingest: bool = False) -> None:
 
     with SnowflakeClient() as sf:
         sf.connect()
-        
+
         # 1. Fetch Date Range
         with sf.cursor() as cur:
             cur.execute(f"SELECT MIN(ASSESSDATE), MAX(ASSESSDATE) FROM {SOURCE_TABLE}")
             min_date, max_date = cur.fetchone()
-            
+
         if not min_date or not max_date:
             print("[ERROR] No data found in parsed table.")
             return
@@ -49,17 +52,18 @@ def run(*, skip_fx_ingest: bool = False) -> None:
         # 3. Physical & Financial Normalization
         print("\n[SQL] Executing Physical & Financial Normalization CTAS...")
         sql = get_physical_normalization_sql(SOURCE_TABLE, TARGET_TABLE)
-        
+
         t_sql = time.time()
         with sf.cursor() as cur:
             cur.execute(sql)
             print(f"[SQL] Created {TARGET_TABLE} in {time.time()-t_sql:.1f}s")
-            
+
             # Verify results
             cur.execute(f"SELECT COUNT(*) FROM {TARGET_TABLE}")
             print(f"[SQL] Total rows processed: {cur.fetchone()[0]:,}")
-            
+
     print(f"\n[OK] Normalization Pipeline completed in {time.time()-t0:.1f}s")
+
 
 if __name__ == "__main__":
     run()

@@ -11,3 +11,4 @@ snowflake-snowpark-python[pandas]>=1.11
 python-dotenv>=1.0
 jupyter>=1.0
 pandas-datareader>=0.10.0
+autogluon>=1.1

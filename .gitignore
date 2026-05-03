@@ -16,3 +16,7 @@ output/
 
 .ipynb_checkpoints/
 .vscode/
+
+# ML Artifacts
+AutogluonModels/
+scratch/

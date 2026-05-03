@@ -25,6 +25,11 @@ The pipeline follows a modern ELT (Extract-Load-Transform) pattern, leveraging S
     - **Barrels**: Unified via standard `42.0` multiplier.
     - **Metric Tons (MT)**: Unified via product-specific gravity lookup (e.g., Gasoline = 8.5 BBL/MT, Diesel = 7.45 BBL/MT).
 
+### **4. Statistical Normalization (ML-Ready Phase)**
+*   **Hard Physical Cap**: Removes extreme outliers (domain knowledge: -$5 to $50/GAL) that poison statistical distributions.
+*   **Winsorization**: Applies a 1% / 99% percentile cap per product to handle heavy-tailed financial distributions.
+*   **Rolling Z-Scores**: Trailing 256-day standard scaling to produce stationary features in the [-3, +3] range, optimized for Time-Series Foundation Models.
+
 ---
 
 ## 🛠️ Technology Stack
@@ -32,7 +37,7 @@ The pipeline follows a modern ELT (Extract-Load-Transform) pattern, leveraging S
 - **Data Warehouse**: Snowflake (SQL + Python UDFs)
 - **External Data**: St. Louis Fed (FRED API)
 - **Orchestration**: Python 3.12 (Argparse, Snowflake-Connector)
-- **Data Science**: Pandas (for FX continuity and ingestion)
+- **Data Science**: Pandas, Matplotlib, Seaborn (for Auditing & FX)
 
 ---
 
@@ -43,16 +48,17 @@ Energy-Strategy/
 ├── pipeline/
 │   ├── main.py                # Single entry point orchestrator
 │   ├── data_decoding.py       # Orchestrates the UDF parsing phase
-│   └── normalization.py       # Orchestrates FX ingest & physical scaling
+│   └── normalization.py       # Orchestrates FX, Physical, and Statistical scaling
 │
 ├── utility/
 │   ├── snowflake_client.py    # Snowflake connection (key-pair auth)
 │   ├── fx_client.py           # FRED API & Snowflake write_pandas logic
-│   ├── normalization_sql.py   # Large-scale CTAS normalization queries
+│   ├── normalization_sql.py   # Physical scaling logic
+│   ├── scaling_sql.py         # Winsorization & Z-Score logic
 │   └── parse_description_udf.py # Core regex parsing logic
 │
 ├── analysis/
-│   └── EDA_analysis.ipynb     # Server-side Snowflake EDA
+│   └── EDA_analysis.ipynb     # ML-Ready Data Audit & Visualization
 │
 ├── requirements.txt           # Minimalist dependencies
 └── README.md                  # Project documentation
@@ -80,16 +86,21 @@ python -m pipeline.main --skip-fx-ingest
 ```
 
 ### 3. **Verify Data Quality**
-The pipeline automatically outputs row counts and outlier detection stats. All prices are guaranteed to be in `USD` per `GAL` upon completion.
+Open `analysis/EDA_analysis.ipynb` to run the ML-Ready Audit. This notebook provides:
+- Unification confirmation (USD/GAL unique counts).
+- Z-score distribution auditing (Mean ~0, Std ~1).
+- Time-series stationarity visualization.
 
 ---
 
-## 📈 Roadmap (Phase 4)
-- **Statistical Clipping**: 0.1% / 99.9% Global Winsorization to remove data-entry errors.
-- **Rolling Z-Scores**: 256-day rolling standard scaling per product to ensure stationarity for Deep Learning models.
+## 📈 Roadmap (Complete)
+- [x] **Data Decoding**: 163M rows parsed via Snowflake UDF.
+- [x] **FX Integration**: FRED historical rates for USD/EUR/CAD.
+- [x] **Physical Unification**: All units to GAL.
+- [x] **Statistical Scaling**: Winsorization & Rolling Z-Scores.
 
 ---
 
-**Status**: ✅ Physical & Financial Normalization Complete (162.6M rows)  
-**Version**: 2.0  
+**Status**: ✅ Production Ready (ML-Ready Dataset Created)  
+**Version**: 3.0  
 **Last Updated**: 2026-05-01
