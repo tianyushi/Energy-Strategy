@@ -17,7 +17,7 @@ import torch
 from tqdm import tqdm
 from einops import rearrange, repeat
 
-DATA_DIR = r"C:\Users\styu0\Energy-Strategy\backtest1"
+DATA_DIR = os.path.dirname(os.path.abspath(__file__))
 CHRONOS_MODEL = "amazon/chronos-2"
 MOIRAI_MODEL = "Salesforce/moirai-1.1-R-small"
 CONTEXT_LENGTH = 512
@@ -191,6 +191,14 @@ def run_full_pipeline(dry_run_days=None):
     df = pd.read_csv(os.path.join(DATA_DIR, "master_dataset.csv"), index_col=0, parse_dates=True)
     df.sort_index(inplace=True)
 
+    # Load actual Close prices for each stock and join them
+    data_backtest_dir = os.path.abspath(os.path.join(DATA_DIR, "..", "data", "data_backtestproject1"))
+    for ticker in ["VLO", "MPC", "PSX", "DINO", "PBF", "DK", "CVI"]:
+        path = os.path.join(data_backtest_dir, f"{ticker}_daily.csv")
+        if os.path.exists(path):
+            stock_df = pd.read_csv(path, parse_dates=['date']).set_index('date')
+            df[f"{ticker}_Close"] = stock_df['Close']
+
     # -- STAGE 1: MOIRAI --
     print(f"\n[2/3] MOIRAI: Does the 3:2:1 Crack Spread drive refiner stocks?")
     stock_analysis, influence_matrix, all_cols = run_moirai_discovery(df)
@@ -211,7 +219,7 @@ def run_full_pipeline(dry_run_days=None):
         print(f"  {ticker:<8} {info['crack_to_stock']:<14.4f} {info['stock_to_crack']:<14.4f} "
               f"{info['ratio']:<8.2f} {info['relation']:<12} {trade_marker}")
 
-    print(f"\n  Full Influence Matrix:")
+    print(f"\n  Full Influence Matrix (Feature Contribution %):")
     print(f"  {'Q \ K':>10}", end="")
     for col in all_cols:
         label = col.replace("_Hedged_Return", "").replace("Crack_Z_Score", "Crack")
@@ -220,8 +228,10 @@ def run_full_pipeline(dry_run_days=None):
     for i, row_col in enumerate(all_cols):
         label = row_col.replace("_Hedged_Return", "").replace("Crack_Z_Score", "Crack")
         print(f"  {label:>10} Q", end="")
+        row_sum = np.sum(influence_matrix[i]) + 1e-8
         for j in range(len(all_cols)):
-            print(f"  {influence_matrix[i,j]:>8.4f}", end="")
+            pct = (influence_matrix[i, j] / row_sum) * 100
+            print(f"  {pct:>7.1f}%", end="")
         print()
 
     # Save MOIRAI results
@@ -251,9 +261,10 @@ def run_full_pipeline(dry_run_days=None):
     test_dates = df[test_mask].index
     if dry_run_days:
         test_dates = test_dates[:dry_run_days]
-        print(f"  DRY RUN: {dry_run_days} days only.")
+        print(f"  DRY RUN: Testing on the first {dry_run_days} days of the out-of-sample test range.")
 
     all_results = []
+    final_tradeable_stocks = []
 
     for ticker in tradeable_stocks:
         stock_col = f"{ticker}_Hedged_Return"
@@ -265,7 +276,7 @@ def run_full_pipeline(dry_run_days=None):
         baseline_correct = 0
         mv_correct = 0
 
-        for i, current_date in enumerate(tqdm(test_dates, desc=f"  {ticker}")):
+        for i, current_date in enumerate(test_dates):
             history = df[df.index < current_date]
             if len(history) < 60:
                 continue
@@ -295,14 +306,24 @@ def run_full_pipeline(dry_run_days=None):
             if (pred_mv['p_up'] > 0.5) == actual_dir:
                 mv_correct += 1
 
+            # --- GET LATEST PRICE TO CONVERT PREDICTION TO PRICE ---
+            # df contains "SYMBOL_Close" columns
+            price_col = f"{ticker}_Close"
+            if price_col in df.columns:
+                last_price = df.loc[history.index[-1], price_col]
+            else:
+                last_price = 100.0 # Fallback if price not found
+                
             all_results.append({
                 'date': current_date,
                 'stock': ticker,
-                'q10': pred_mv['q10'],
-                'q30': pred_mv['q30'],
-                'q50': pred_mv['q50'],
-                'q70': pred_mv['q70'],
-                'q90': pred_mv['q90'],
+                'q10_ret': pred_mv['q10'],
+                'q50_ret': pred_mv['q50'],
+                'q90_ret': pred_mv['q90'],
+                'q10_price': last_price * (1 + pred_mv['q10']),
+                'q50_price': last_price * (1 + pred_mv['q50']),
+                'q90_price': last_price * (1 + pred_mv['q90']),
+                'actual_price': last_price * (1 + actual_ret),
                 'p_up': pred_mv['p_up'],
                 'actual_return': actual_ret,
                 'base_p_up': pred_base['p_up'],
@@ -337,12 +358,27 @@ def run_full_pipeline(dry_run_days=None):
             print(f"  Univariate (History Only): MAE {avg_base_mae:.5f} | Hit: {base_hit:.1f}%")
             print(f"  Multivariate (+Crack):     MAE {avg_mv_mae:.5f} | Hit: {mv_hit:.1f}%")
             sign = "+" if mae_improvement > 0 else ""
-            print(f"  Improvement:               MAE {sign}{mae_improvement:.5f} | Hit: {sign}{hit_improvement:.1f}%")
+            h_sign = "+" if hit_improvement > 0 else ""
+            print(f"  Improvement:               MAE {sign}{mae_improvement:.5f} | Hit: {h_sign}{hit_improvement:.1f}%")
             
             print(f"\n  [ FEATURE IMPORTANCE (% of Forecast Signal) ]")
             print(f"  1. {ticker} History: {y_hist_pct:>6.1f}%")
             print(f"  2. 3:2:1 Crack:  {pair_pct:>6.1f}%")
             print(f"  {'-'*70}\n")
+            
+            # Record if it passes the final ablation rule (only accuracy improvement)
+            if hit_improvement > 0:
+                final_tradeable_stocks.append(ticker)
+
+    print(f"\n{'='*70}")
+    print(f" FINAL SELECTION RULE APPLIED:")
+    print(f" 1. MOIRAI FOLLOWER? (Attention Ratio > 1.2)")
+    print(f" 2. ABLATION IMPROVED? (Crack Spread improved directional accuracy/hit rate)")
+    print(f" -> Selected: {final_tradeable_stocks}")
+    print(f"{'='*70}")
+
+    # Filter all_results to only include the final_tradeable_stocks
+    all_results = [r for r in all_results if r['stock'] in final_tradeable_stocks]
 
     res_df = pd.DataFrame(all_results)
     out_path = os.path.join(DATA_DIR, "inference_results.csv")

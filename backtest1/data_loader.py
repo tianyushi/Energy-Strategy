@@ -7,7 +7,7 @@ import warnings
 # Suppress pandas FutureWarning for fillna(method='bfill')
 warnings.simplefilter(action='ignore', category=FutureWarning)
 
-DATA_DIR = r"C:\Users\styu0\Energy-Strategy\data\data_backtestproject1"
+DATA_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "data", "data_backtestproject1"))
 FUTURES_DIR = os.path.join(DATA_DIR, "futures")
 
 def build_continuous_futures(commodity, M=3):

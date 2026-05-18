@@ -1,10 +1,41 @@
 """
 Backtester for Project 1: 3:2:1 Crack Spread → Refiner Stocks.
 
-Strategy: Confidence-scaled daily trading.
-  - Chronos AI predicts P(UP) each day using crack spread signal.
-  - Position size = |P(UP) - 0.5| × 2 × $100. Held for 1 day.
-  - Notional: $100 (multiply by 100K for real $10M trading).
+BASIC TRADING RULES & MECHANICS:
+=================================
+1. Universe Selection (Vetted Follower Universe):
+   - The strategy only trades refiner stocks classified by Salesforce MOIRAI as "Followers" 
+     (attention ratio stock_to_crack / crack_to_stock > 1.2) and verified by walking-forward 
+     Chronos-2 ablation analysis (multivariate hit-rate > baseline hit-rate).
+   - Vetted universe on 2020 out-of-sample period: ['PSX', 'CVI'].
+
+2. Position Timing & Execution:
+   - Signal Time: At the end of day T-1, the history is sliced strictly BEFORE T (history < date T) 
+     to predict the directional probability P(UP) and return for Day T (No look-ahead bias).
+   - Execution Time: The trade is executed at the Market-on-Close (MOC) of Day T-1 (equivalent to 
+     entering at the exact Market Open of Day T).
+   - Holding Period: The position is held for exactly 1 business day (Day T).
+   - Exit/Roll Time: The position is closed at the Market-on-Close (MOC) of Day T.
+
+3. Position Sizing (Confidence Scaling):
+   - Sizing Formula: Size = (1 if P(UP) > 0.5 else -1) * |P(UP) - 0.5| * 2 * NOTIONAL.
+   - For a standard notional of $100:
+     - Neutral prediction (P(UP) = 0.50) -> Flat position ($0 size).
+     - Strong prediction (e.g. P(UP) = 0.80 or 0.20) -> Position scaled to 60% of maximum ($60 size).
+     - Maximum confidence (P(UP) = 1.00 or 0.00) -> Max position ($100 size).
+
+4. Volatility / Market Risk Hedging (Beta Hedging):
+   - Isolates pure refinery alpha by hedging out broad equity/energy market fluctuations.
+   - The return traded is the Beta-Hedged Return:
+       Hedged_Return = Raw_Return - Beta * SPY_Return
+   - Beta is computed dynamically using a 60-day rolling covariance/variance against SPY.
+
+5. Portfolio Basket Weighting:
+   - Equal-Weight Basket: splits capital equally (50.0% each) between PSX and CVI.
+   - Attention-Weighted Basket: capital is allocated proportional to their MOIRAI attention
+     dependency on the 3:2:1 Crack Spread:
+       - PSX Weight: 0.0392 / (0.0392 + 0.0269) = 59.3%
+       - CVI Weight: 0.0269 / (0.0392 + 0.0269) = 40.7%
 """
 
 import os
@@ -12,7 +43,7 @@ import json
 import numpy as np
 import pandas as pd
 
-DATA_DIR = r"C:\Users\styu0\Energy-Strategy\backtest1"
+DATA_DIR = os.path.dirname(os.path.abspath(__file__))
 NOTIONAL = 100
 
 
@@ -63,27 +94,33 @@ def run_backtest():
     eq_m = calc_metrics(eq_pnl)
     at_m = calc_metrics(attn_pnl)
 
-    # ══════════════════════════════════════════════════════════════
+    # ==============================================================
     # OUTPUT
-    # ══════════════════════════════════════════════════════════════
+    # ==============================================================
     print("=" * 72)
-    print(" BACKTEST RESULTS: Crack Spread → Refiner Stocks ($100 notional)")
+    print(" BACKTEST RESULTS: Crack Spread -> Refiner Stocks ($100 notional)")
     print("=" * 72)
     print(f"\n  Strategy: Chronos predicts P(UP) daily using crack spread signal.")
-    print(f"  Sizing: Bet = |P(UP)-0.5| × 2 × $100.  Hold: 1 day.\n")
+    print(f"  Sizing: Bet = |P(UP)-0.5| × 2 × $100.  Hold: 1 day.")
+    print(f"  Attn-Weighted: Capital is allocated to each stock proportional to its MOIRAI")
+    print(f"                 attention dependency (strength) on the 3:2:1 crack spread.\n")
 
-    print(f"  {'STRATEGY':<30} {'Sharpe':>7} {'P&L':>8} {'Hit%':>6} {'MaxDD':>8} {'Accuracy'}")
-    print(f"  {'─' * 72}")
+    print(f"  {'STRATEGY':<30} {'Sharpe':>7} {'P&L':>8} {'Hit%':>6} {'MaxDD':>8} {'Accuracy':<15} {'Attn-Weight':>11}")
+    print(f"  {'-' * 88}")
     for s, d in sorted(individual.items(), key=lambda x: x[1]['metrics']['sharpe'], reverse=True):
         m = d['metrics']
-        print(f"  {s:<30} {m['sharpe']:>7.2f} ${m['total_pnl']:>6.2f} {m['hit_rate']:>5.1f}% ${m['max_dd']:>6.2f}  {d['accuracy']}")
-    print(f"  {'─' * 72}")
-    print(f"  {'Equal-Weight Basket':<30} {eq_m['sharpe']:>7.2f} ${eq_m['total_pnl']:>6.2f} {eq_m['hit_rate']:>5.1f}% ${eq_m['max_dd']:>6.2f}")
-    print(f"  {'Attn-Weighted Basket':<30} {at_m['sharpe']:>7.2f} ${at_m['total_pnl']:>6.2f} {at_m['hit_rate']:>5.1f}% ${at_m['max_dd']:>6.2f}")
+        w_pct = nw.get(s, 0.0) * 100
+        print(f"  {s:<30} {m['sharpe']:>7.2f} ${m['total_pnl']:>6.2f} {m['hit_rate']:>5.1f}% ${m['max_dd']:>6.2f}  {d['accuracy']:<15} {w_pct:>10.1f}%")
+    print(f"  {'-' * 88}")
+    print(f"  {'Equal-Weight Basket':<30} {eq_m['sharpe']:>7.2f} ${eq_m['total_pnl']:>6.2f} {eq_m['hit_rate']:>5.1f}% ${eq_m['max_dd']:>6.2f}  {'1/N each':<15} {'50.0% each':>11}")
+    print(f"  {'Attn-Weighted Basket':<30} {at_m['sharpe']:>7.2f} ${at_m['total_pnl']:>6.2f} {at_m['hit_rate']:>5.1f}% ${at_m['max_dd']:>6.2f}  {'Weighted':<15} {'100.0% total':>11}")
 
     best = max({**{s: d['metrics'] for s, d in individual.items()},
                 "EQ-Basket": eq_m, "Attn-Basket": at_m}.items(), key=lambda x: x[1]['sharpe'])
-    print(f"\n  🏆 BEST: {best[0]} (Sharpe {best[1]['sharpe']})")
+    print(f"\n  [BEST]: {best[0]} (Sharpe {best[1]['sharpe']})")
+    
+
+
     print("=" * 72)
 
 
