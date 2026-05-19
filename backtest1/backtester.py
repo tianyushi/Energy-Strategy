@@ -145,6 +145,7 @@ def vet_moirai_candidates_with_ablation(history_df, candidate_tickers):
             
             print(f"  [{ticker}] Running ablation over last 21 days...")
             for current_date in ablation_test_dates:
+                print(f"\r    [Ablation] Inferencing {ticker} on {current_date.date()}...", end="", flush=True)
                 hist = history_df[history_df.index < current_date]
                 if len(hist) < 60:
                     continue
@@ -166,6 +167,7 @@ def vet_moirai_candidates_with_ablation(history_df, candidate_tickers):
                 if (pred_mv['p_up'] > 0.5) == actual_dir:
                     mv_correct += 1
                     
+            print()
             if not baseline_maes:
                 print(f"  [Ablation Warning] Not enough valid test days for {ticker}.")
                 continue
@@ -262,12 +264,12 @@ class WFOEngine:
     def load_data(self):
         print(f"Loading master dataset from: {self.data_path}")
         df = pd.read_csv(self.data_path, index_col=0, parse_dates=True).sort_index()
-        # Enforce smoke test window: Keep only 2015 (warmup) and 2016 (testing)
-        self.master_df = df[(df.index >= '2015-01-01') & (df.index <= '2016-12-31')]
+        # Allow full production run from 2015 warmup to 2021 end
+        self.master_df = df[(df.index >= '2015-01-01') & (df.index <= '2021-12-31')]
         
     def run(self):
         print("=" * 80)
-        print(" RAPID SMOKE TEST: WFO ENGINE (2016)")
+        print(" PRODUCTION: WFO ENGINE (2016-2021)")
         print("=" * 80)
         
         out_dir = os.path.dirname(self.data_path)
@@ -371,8 +373,11 @@ class WFOEngine:
             monthly_pnl_sum = 0.0
             monthly_friction = 0.0
             for T in test_days:
-                # History strictly ends at T-1 to prevent look-ahead bias
-                history_T = self.master_df[self.master_df.index < T]
+                # Strictly slice the trailing 365 calendar days up to T-1 to prevent OOM
+                lookback_start = T - pd.Timedelta(days=365)
+                history_T = self.master_df[(self.master_df.index >= lookback_start) & (self.master_df.index < T)]
+                print(f"\r  [Execution] Running Chronos for {T.date()}...", end="", flush=True)
+                
                 if len(history_T) == 0:
                     continue
                     
@@ -381,20 +386,36 @@ class WFOEngine:
                 all_active_tickers = set(vetted_tickers).union(self.current_positions.keys())
                 
                 for ticker in all_active_tickers:
+                    target_size = 0.0
+                    p_up = 0.5  # Default neutral
+                    
                     if ticker in vetted_tickers:
-                        p_up = get_chronos_prediction(history_T, ticker)
+                        hedged_ret_col = f"{ticker}_Hedged_Return"
                         
-                        # Deadband Filter
-                        if 0.45 < p_up < 0.55:
-                            target_size = 0.0
-                        else:
-                            # Sizing Formula: Aggressively leverage high-confidence signals
-                            conviction = min(1.0, abs(p_up - 0.5) * 10)
-                            ticker_capital = self.notional * weights.get(ticker, 0.0)
-                            target_size = (1 if p_up > 0.5 else -1) * conviction * ticker_capital
-                    else:
-                        target_size = 0.0
+                        # --- HARD STOP-LOSS: Black Swan Breaker ---
+                        # If the asset has crashed >10% in trailing 5 trading days, bypass AI and force liquidation
+                        stop_loss_triggered = False
+                        if hedged_ret_col in history_T.columns and len(history_T) >= 6:
+                            trailing_5d_ret = (
+                                (history_T.iloc[-1][hedged_ret_col] + 1) /
+                                (history_T.iloc[-6][hedged_ret_col] + 1) - 1
+                            )
+                            if trailing_5d_ret < -0.10:
+                                target_size = 0.0  # Force liquidation / stop-loss
+                                stop_loss_triggered = True
                         
+                        if not stop_loss_triggered:
+                            p_up = get_chronos_prediction(history_T, ticker)
+                            
+                            # --- AGGRESSIVE DEADBAND: Only trade if extremely confident ---
+                            if 0.40 < p_up < 0.60:
+                                target_size = 0.0
+                            else:
+                                # Scale conviction dynamically for tail probabilities
+                                conviction = min(1.0, abs(p_up - 0.5) * 5) # Adjusted scale multiplier
+                                ticker_capital = self.notional * weights.get(ticker, 0.0)
+                                target_size = (1 if p_up > 0.5 else -1) * conviction * ticker_capital
+                    
                     current_size = self.current_positions.get(ticker, 0.0)
                     trade_size = target_size - current_size
                     
@@ -417,15 +438,14 @@ class WFOEngine:
                             'PnL': asset_pnl
                         })
                         
-                        # Log trade outcomes for Confidence Scaling Metric
-                        if ticker in vetted_tickers:
-                            if target_size != 0.0:
-                                self.trade_logs.append({
-                                    'Date': T,
-                                    'Ticker': ticker,
-                                    'p_up': p_up,
-                                    'Actual_Return': actual_ret
-                                })
+                        # Log trade outcomes for Confidence Scaling Metric (only non-zero, non-stoploss trades)
+                        if ticker in vetted_tickers and target_size != 0.0:
+                            self.trade_logs.append({
+                                'Date': T,
+                                'Ticker': ticker,
+                                'p_up': p_up,
+                                'Actual_Return': actual_ret
+                            })
                         
                     # Update State
                     if target_size == 0.0:
@@ -451,7 +471,7 @@ class WFOEngine:
                 monthly_pnl_sum += day_pnl
                 
             monthly_ret_pct = (monthly_pnl_sum / self.notional) * 100
-            print(f"  -> [Outcome] Month {current_month_end.date()}: Net Return = {monthly_ret_pct:+.2f}% | Net PnL = ${monthly_pnl_sum:+.2f} | Mthly Friction: ${monthly_friction:.2f}\n")
+            print(f"\n  -> [Outcome] Month {current_month_end.date()}: Net Return = {monthly_ret_pct:+.2f}% | Net PnL = ${monthly_pnl_sum:+.2f} | Mthly Friction: ${monthly_friction:.2f}\n")
                 
         # Convert daily return series against total daily notional capital
         daily_returns = daily_pnl / self.notional
@@ -577,6 +597,13 @@ class WFOEngine:
         print(f" Calmar Ratio:           {calmar:.2f}")
         print(f" Daily Win Rate:         {win_rate:.1f}%")
         print("-" * 60)
+        print(" Annual Sharpe Ratios:")
+        for year in daily_returns.index.year.unique():
+            yr_ret = daily_returns[daily_returns.index.year == year]
+            if len(yr_ret) > 10 and yr_ret.std() > 0:
+                yr_sharpe = np.sqrt(252) * yr_ret.mean() / yr_ret.std()
+                print(f"   {year}: {yr_sharpe:.2f}")
+        print("-" * 60)
         print(f" High Confidence Hit:    {high_conf_hit:.1f}% (N={len(high_conf) if not trade_df.empty else 0})")
         print(f" Low Confidence Hit:     {low_conf_hit:.1f}% (N={len(low_conf) if not trade_df.empty else 0})")
         print("=" * 60)
@@ -584,8 +611,8 @@ class WFOEngine:
         # ----------------------------------------------------------------------
         # 3. MASTER INSTITUTIONAL TEARSHEET PLOT
         # ----------------------------------------------------------------------
-        fig = plt.figure(figsize=(16, 30))
-        gs = GridSpec(5, 1, height_ratios=[2.5, 1.5, 2, 2, 2.5], hspace=0.4)
+        fig = plt.figure(figsize=(16, 36))
+        gs = GridSpec(6, 1, height_ratios=[2.5, 1.5, 2, 2, 2.5, 2], hspace=0.4)
         
         # Ax1: Cumulative Equity Curve
         ax1 = fig.add_subplot(gs[0])
@@ -672,6 +699,33 @@ class WFOEngine:
             ax5.legend(title='Ticker', loc='upper left', bbox_to_anchor=(1.02, 1))
             ax5.tick_params(axis='x', rotation=45)
             
+        # Ax6: Rolling 252-Day Annualized Sharpe Ratio
+        ax6 = fig.add_subplot(gs[5])
+        
+        # 1. Calculate 252-Day Rolling Sharpe
+        rolling_window = 252
+        roll_mean = daily_returns.rolling(window=rolling_window).mean()
+        roll_std = daily_returns.rolling(window=rolling_window).std()
+        
+        # Avoid division by zero
+        roll_std = roll_std.replace(0, np.nan)
+        rolling_sharpe = (roll_mean / roll_std) * np.sqrt(252)
+        
+        # 2. Plotting
+        ax6.plot(rolling_sharpe.index, rolling_sharpe, color='darkorange', lw=2)
+        ax6.axhline(1.0, color='black', linestyle='--', lw=1.5, label='Good Sharpe Threshold (1.0)')
+        ax6.axhline(0.0, color='gray', linestyle='-', lw=1)
+        
+        # Fill color depending on above/below zero
+        ax6.fill_between(rolling_sharpe.index, rolling_sharpe, 0, where=(rolling_sharpe > 0), color='forestgreen', alpha=0.3)
+        ax6.fill_between(rolling_sharpe.index, rolling_sharpe, 0, where=(rolling_sharpe <= 0), color='crimson', alpha=0.3)
+        
+        ax6.set_title('Rolling 252-Day Annualized Sharpe Ratio', fontsize=16, fontweight='bold')
+        ax6.set_ylabel('Sharpe Ratio', fontsize=12)
+        ax6.set_xlabel('Date', fontsize=12)
+        ax6.legend(loc='upper left')
+        ax6.grid(True, alpha=0.3)
+        
         plt.tight_layout()
         master_path = os.path.join(out_dir, "master_wfo_tearsheet.png")
         plt.savefig(master_path, dpi=300, bbox_inches='tight')
