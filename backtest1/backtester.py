@@ -497,18 +497,44 @@ class WFOEngine:
         # ----------------------------------------------------------------------
         # 1. DUAL BENCHMARK DATA SWAP (SP500 & XLE)
         # ----------------------------------------------------------------------
-        benchmark_spy = None
-        benchmark_xle = None
-        
+        print("\n" + "="*50)
+        print("=== [CRITICAL DEBUG] BENCHMARK ALIGNMENT CHECK ===")
+        print(f"Total Columns in master_df: {list(self.master_df.columns)}")
+        print("="*50 + "\n")
+
+        # Keep SPY As-Is: Keep extracting benchmark_spy from self.master_df.loc[daily_returns.index, "SPY_Return"]
         if "SPY_Return" in self.master_df.columns:
             benchmark_spy = self.master_df.loc[daily_returns.index, "SPY_Return"]
         else:
-            benchmark_spy = daily_returns * 0.0
-            
-        if "XLE_Return" in self.master_df.columns:
-            benchmark_xle = self.master_df.loc[daily_returns.index, "XLE_Return"]
-        else:
-            benchmark_xle = daily_returns * 0.0
+            raise KeyError("SPY_Return missing from master_df!")
+
+        # Load External XLE CSV
+        xle_path = r"C:\Users\styu0\Energy-Strategy\data\data_backtestproject1\XLE_daily.csv"
+        if not os.path.exists(xle_path):
+            raise FileNotFoundError(f"XLE CSV file not found at path: {xle_path}")
+
+        xle_df = pd.read_csv(xle_path)
+        # Clean column headers
+        xle_df.columns = [c.strip().lower() for c in xle_df.columns]
+        if 'date' not in xle_df.columns:
+            raise KeyError("XLE CSV does not contain a 'date' column.")
+
+        xle_df['date'] = pd.to_datetime(xle_df['date'])
+        xle_df.set_index('date', inplace=True)
+        xle_df.sort_index(inplace=True)
+
+        if 'close' not in xle_df.columns:
+            raise KeyError("XLE CSV does not contain a 'Close' price column.")
+
+        # Compute the daily fractional change since it only contains price data
+        xle_returns_full = xle_df['close'].pct_change()
+
+        # Align/filter to backtest execution dates. Fill holiday NaNs with 0.0
+        benchmark_xle = xle_returns_full.reindex(daily_returns.index).fillna(0.0)
+
+        # Verify Data Vitality (No More Silent Zeros)
+        assert benchmark_xle.std() > 0, "CRITICAL: Loaded XLE benchmark has zero variance! Check data parsing."
+        print(f"-> Successfully dynamically injected XLE data. Volatility: {benchmark_xle.std():.6f}")
             
         # ----------------------------------------------------------------------
         # 2. HARDCORE STATISTICS MATRIX (Console)
