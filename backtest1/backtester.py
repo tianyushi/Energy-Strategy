@@ -377,15 +377,21 @@ class WFOEngine:
                     continue
                     
                 day_pnl = 0.0
+                active_allocated_dollars = 0.0
                 all_active_tickers = set(vetted_tickers).union(self.current_positions.keys())
                 
                 for ticker in all_active_tickers:
                     if ticker in vetted_tickers:
                         p_up = get_chronos_prediction(history_T, ticker)
-                        # Sizing Formula
-                        size_multiplier = (1 if p_up > 0.5 else -1) * abs(p_up - 0.5) * 2
-                        ticker_capital = self.notional * weights.get(ticker, 0.0)
-                        target_size = size_multiplier * ticker_capital
+                        
+                        # Deadband Filter
+                        if 0.45 < p_up < 0.55:
+                            target_size = 0.0
+                        else:
+                            # Sizing Formula: Aggressively leverage high-confidence signals
+                            conviction = min(1.0, abs(p_up - 0.5) * 10)
+                            ticker_capital = self.notional * weights.get(ticker, 0.0)
+                            target_size = (1 if p_up > 0.5 else -1) * conviction * ticker_capital
                     else:
                         target_size = 0.0
                         
@@ -395,6 +401,8 @@ class WFOEngine:
                     friction_cost = abs(trade_size) * (TRANSACTION_COST_BPS / 10000.0)
                     monthly_friction += friction_cost
                     self.total_transaction_costs += friction_cost
+                    
+                    active_allocated_dollars += abs(target_size)
                     
                     # Executed at MOC of T-1 and closed at MOC of Day T
                     hedged_ret_col = f"{ticker}_Hedged_Return"
@@ -411,18 +419,33 @@ class WFOEngine:
                         
                         # Log trade outcomes for Confidence Scaling Metric
                         if ticker in vetted_tickers:
-                            self.trade_logs.append({
-                                'Date': T,
-                                'Ticker': ticker,
-                                'p_up': p_up,
-                                'Actual_Return': actual_ret
-                            })
+                            if target_size != 0.0:
+                                self.trade_logs.append({
+                                    'Date': T,
+                                    'Ticker': ticker,
+                                    'p_up': p_up,
+                                    'Actual_Return': actual_ret
+                                })
                         
                     # Update State
                     if target_size == 0.0:
                         self.current_positions.pop(ticker, None)
                     else:
                         self.current_positions[ticker] = target_size
+                        
+                # Core-Satellite (Beta Sweep) Smoothing
+                active_allocated_pct = active_allocated_dollars / self.notional
+                if active_allocated_pct < 1.0 and "SPY_Return" in self.master_df.columns:
+                    spy_sweep_size = self.notional * (1.0 - active_allocated_pct)
+                    spy_ret = self.master_df.loc[T, "SPY_Return"]
+                    spy_pnl = spy_sweep_size * spy_ret
+                    day_pnl += spy_pnl
+                    
+                    self.ticker_pnl_log.append({
+                        'Date': T,
+                        'Ticker': 'SPY_Sweep',
+                        'PnL': spy_pnl
+                    })
                         
                 daily_pnl.loc[T] = day_pnl
                 monthly_pnl_sum += day_pnl
@@ -472,15 +495,20 @@ class WFOEngine:
         patch_pandas_to_offset()
         
         # ----------------------------------------------------------------------
-        # 1. BENCHMARK DATA SWAP (SP500)
+        # 1. DUAL BENCHMARK DATA SWAP (SP500 & XLE)
         # ----------------------------------------------------------------------
-        benchmark = None
+        benchmark_spy = None
+        benchmark_xle = None
+        
         if "SPY_Return" in self.master_df.columns:
-            benchmark = self.master_df.loc[daily_returns.index, "SPY_Return"]
-        elif "Basket_Return" in self.master_df.columns:
-            benchmark = self.master_df.loc[daily_returns.index, "Basket_Return"]
+            benchmark_spy = self.master_df.loc[daily_returns.index, "SPY_Return"]
         else:
-            benchmark = daily_returns * 0.0
+            benchmark_spy = daily_returns * 0.0
+            
+        if "XLE_Return" in self.master_df.columns:
+            benchmark_xle = self.master_df.loc[daily_returns.index, "XLE_Return"]
+        else:
+            benchmark_xle = daily_returns * 0.0
             
         # ----------------------------------------------------------------------
         # 2. HARDCORE STATISTICS MATRIX (Console)
@@ -536,15 +564,17 @@ class WFOEngine:
         # Ax1: Cumulative Equity Curve
         ax1 = fig.add_subplot(gs[0])
         cum_strat = (1 + daily_returns).cumprod() * 100
-        cum_bench = (1 + benchmark).cumprod() * 100
+        cum_bench_spy = (1 + benchmark_spy).cumprod() * 100
+        cum_bench_xle = (1 + benchmark_xle).cumprod() * 100
         
         ax1.plot(cum_strat.index, cum_strat, label='Strategy Net NAV', color='dodgerblue', lw=2.5)
-        ax1.plot(cum_bench.index, cum_bench, label='Benchmark', color='gray', lw=1.5, ls='--')
+        ax1.plot(cum_bench_spy.index, cum_bench_spy, label='S&P 500 Benchmark', color='gray', lw=1.5, ls='--')
+        ax1.plot(cum_bench_xle.index, cum_bench_xle, label='XLE Energy Benchmark', color='purple', lw=1.5, ls='--')
         
-        ax1.fill_between(cum_strat.index, cum_bench, cum_strat, where=(cum_strat > cum_bench), 
-                         interpolate=True, color='mediumseagreen', alpha=0.2, label='Outperformance')
+        ax1.fill_between(cum_strat.index, cum_bench_spy, cum_strat, where=(cum_strat > cum_bench_spy), 
+                         interpolate=True, color='mediumseagreen', alpha=0.2, label='Outperformance (vs SPY)')
                          
-        ax1.set_title('Cumulative Equity Curve ($100 Init)', fontsize=16, fontweight='bold')
+        ax1.set_title('Strategy vs. Dual-Benchmark Cumulative Equity ($100 Init)', fontsize=16, fontweight='bold')
         ax1.set_ylabel('Portfolio Value ($)', fontsize=12)
         ax1.legend(loc='upper left')
         ax1.grid(True, alpha=0.3)

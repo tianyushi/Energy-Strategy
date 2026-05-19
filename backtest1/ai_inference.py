@@ -154,16 +154,21 @@ def run_chronos_inference(pipeline, history_df, target_col, covariate_cols):
     context = history_df[cols].values.T
     if context.shape[1] > CONTEXT_LENGTH:
         context = context[:, -CONTEXT_LENGTH:]
-    tensor = torch.tensor(context, dtype=torch.float32).unsqueeze(0)
+        
+    # Scale up signal magnitude by 100 to avoid Chronos rounding out fractional returns
+    context_scaled = context * 100.0
+    
+    tensor = torch.tensor(context_scaled, dtype=torch.float32).unsqueeze(0)
     with torch.inference_mode():
         q_list, m_list = pipeline.predict_quantiles(
             tensor, prediction_length=1,
-            quantile_levels=[0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9],
+            quantile_levels=[0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9]
         )
     q_tensor = q_list[0]
     # q_tensor shape: (n_variates, pred_len, 9_quantiles)
     # Quantile indices: 0=Q10, 1=Q20, 2=Q30, 3=Q40, 4=Q50, 5=Q60, 6=Q70, 7=Q80, 8=Q90
-    target_quantiles = q_tensor[0, 0, :].cpu().numpy()
+    # Divide by 100 to scale back to standard fractional return space
+    target_quantiles = q_tensor[0, 0, :].cpu().numpy() / 100.0
     p_up = float(np.mean(target_quantiles > 0.0))
     return {
         'q10': float(target_quantiles[0]),
