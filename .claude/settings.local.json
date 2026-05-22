@@ -1,0 +1,7 @@
+{
+  "permissions": {
+    "allow": [
+      "PowerShell(python -c \"import sys; sys.path.insert\\(0, 'refiner_strategy'\\); from refiner_strategy.config import TICKERS; from refiner_strategy.sizing.schemes import SIZERS; print\\(TICKERS, list\\(SIZERS.keys\\(\\)\\)\\)\")"
+    ]
+  }
+}

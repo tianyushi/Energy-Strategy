@@ -69,6 +69,13 @@ patch_pandas_to_offset()
 # Add the directory to path to ensure clean import of ai_inference
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
+# Import the new risk engine
+try:
+    from risk_engine import apply_risk_defense
+except ImportError:
+    print("Warning: risk_engine.py not found. Risk defenses will be disabled.")
+    def apply_risk_defense(ts, tk, ht, cn): return ts, 0.0
+
 # Global cache for Chronos base pipeline to avoid reloading the weights daily
 CHRONOS_PIPELINE = None
 TRANSACTION_COST_BPS = 10.0
@@ -383,6 +390,7 @@ class WFOEngine:
                     
                 day_pnl = 0.0
                 active_allocated_dollars = 0.0
+                total_hedge_size = 0.0  # Accumulate tail-risk hedges
                 all_active_tickers = set(vetted_tickers).union(self.current_positions.keys())
                 
                 for ticker in all_active_tickers:
@@ -415,6 +423,10 @@ class WFOEngine:
                                 conviction = min(1.0, abs(p_up - 0.5) * 5) # Adjusted scale multiplier
                                 ticker_capital = self.notional * weights.get(ticker, 0.0)
                                 target_size = (1 if p_up > 0.5 else -1) * conviction * ticker_capital
+                    
+                    # --- APPLY THREE-LAYER RISK DEFENSE ---
+                    target_size, current_hedge = apply_risk_defense(target_size, ticker, history_T, self.notional)
+                    total_hedge_size += current_hedge
                     
                     current_size = self.current_positions.get(ticker, 0.0)
                     trade_size = target_size - current_size
@@ -453,11 +465,36 @@ class WFOEngine:
                     else:
                         self.current_positions[ticker] = target_size
                         
-                # Core-Satellite (Beta Sweep) Smoothing
+                # Core-Satellite (Beta Sweep) Smoothing & Dynamic Hedging
                 active_allocated_pct = active_allocated_dollars / self.notional
-                if active_allocated_pct < 1.0 and "SPY_Return" in self.master_df.columns:
-                    spy_sweep_size = self.notional * (1.0 - active_allocated_pct)
-                    spy_ret = self.master_df.loc[T, "SPY_Return"]
+                spy_ret = self.master_df.loc[T, "SPY_Return"] if "SPY_Return" in self.master_df.columns else 0.0
+                
+                # Execute emergency short hedge if triggered by Layer 3
+                if total_hedge_size != 0.0:
+                    hedge_pnl = total_hedge_size * spy_ret
+                    day_pnl += hedge_pnl
+                    self.ticker_pnl_log.append({
+                        'Date': T,
+                        'Ticker': 'SPY_Hedge',
+                        'PnL': hedge_pnl
+                    })
+                    print(f"\n      [RISK ENGINE] Emergency SPY Hedge Executed: {total_hedge_size:.2f} at {T.date()}")
+                
+                elif active_allocated_pct < 1.0 and "SPY_Return" in self.master_df.columns:
+                    # Calculate 21-day annualized Realized Volatility of SPY
+                    if len(history_T) >= 21:
+                        spy_21d_vol = history_T["SPY_Return"].iloc[-21:].std() * np.sqrt(252)
+                        spy_21d_vol = max(spy_21d_vol, 0.05) # Floor at 5% to prevent division by zero/hyper-leverage
+                    else:
+                        spy_21d_vol = 0.15 # Default baseline vol
+                        
+                    target_vol = 0.15 # Target 15% annualized volatility
+                    vol_scalar = target_vol / spy_21d_vol
+                    vol_scalar = min(vol_scalar, 1.0) # Never lever up greater than 1x cash
+                    
+                    # Dynamically shrink the sweep size when the market is crashing/highly volatile
+                    spy_sweep_size = self.notional * (1.0 - active_allocated_pct) * vol_scalar
+                    
                     spy_pnl = spy_sweep_size * spy_ret
                     day_pnl += spy_pnl
                     
