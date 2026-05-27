@@ -43,9 +43,7 @@ coverage.xml
 *.cover
 
 # === Data & Output (large files) ===
-data/
 output/
-!data/.gitkeep
 !output/.gitkeep
 
 # === ML Artifacts ===
